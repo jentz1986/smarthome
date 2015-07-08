@@ -101,6 +101,7 @@ class FritzBox(lib.www.Client):
 
     def __init__(self, smarthome, username, password, host='fritz.box', cycle=300, timeout=5):
         self._sid = False
+        self._sid_time = False
         self._sh = smarthome
         self._fritzbox = host
         self._cycle = int(cycle)
@@ -109,6 +110,7 @@ class FritzBox(lib.www.Client):
         self._timeout = int(timeout)
         self._items = []
         self._ahas = []
+        self._callmonitor_inited = False
         self._callmonitor_logics = []
 
     def run(self):
@@ -117,8 +119,7 @@ class FritzBox(lib.www.Client):
         content = self._aha_command('getswitchlist')
         if content and 'homeautoswitch' not in content:
             logger.info("FritzBox: found the following AIN: {}".format(content))
-        if self._callmonitor_logics != []:
-            self.__callmonitor = CallMonitor(self._callmonitor_logics, self._fritzbox)
+        self.try_start_callmonitor()
 
     def stop(self):
         self.alive = False
@@ -157,6 +158,7 @@ class FritzBox(lib.www.Client):
         if 'fritzbox' in logic.conf:
             if logic.conf['fritzbox'] == 'callmonitor':
                 self._callmonitor_logics.append(logic)
+                self.try_start_callmonitor()
 
     def update_aha(self, item, caller=None, source=None, dest=None):
         if caller != 'FritzBox':
@@ -177,6 +179,29 @@ class FritzBox(lib.www.Client):
                 self._set(command)
 
     # Plugin specific public methods
+    
+    def try_start_callmonitor(self):
+        if self._callmonitor_logics != []:
+            if not self._callmonitor_inited:
+                self._callmonitor_inited = True
+                self.__callmonitor = CallMonitor(self._callmonitor_logics, self._fritzbox)
+
+    def phonebook_lookup(self, callerId):
+        content = self.fetch_url("https://{}:49443/phonebook.lua?sid={}&pbid={}".format(self._fritzbox, self._get_sid(),0))
+        if content:
+            entries = []
+            tree = xml.etree.cElementTree.fromstring(content.decode())
+            lookupXpath = ".//*[number='{}']/../person/realName".format(callerId)
+            foundElement = tree.find(lookupXpath)
+            logger.debug("Fritzbox, phonebook_lookup, found: {}".format(foundElement))
+            if foundElement is None:
+                logger.info("Fritzbox, phonebook_lookup, {} not found".format(callerId))
+                return callerId
+            else:
+                return foundElement.text
+        else:
+            logger.warning("no phonebook found with id 0")
+            return
 
     def call(self, call_from, call_to):
         self._set('setport', call_from)
@@ -251,6 +276,11 @@ class FritzBox(lib.www.Client):
                 return element.text == check
 
     def _get_sid(self):
+        if self._sid_time:
+            if self._sid_time < (datetime.datetime.now() - datetime.timedelta(seconds = 550)):
+                self._sid = False
+        else:
+            self._sid = False
         if self._sid:
             return self._sid
         content = self.fetch_url("http://{}/login_sid.lua".format(self._fritzbox), timeout=self._timeout)
@@ -264,6 +294,7 @@ class FritzBox(lib.www.Client):
             sid = tree.find('.//SID').text
             if sid != '0000000000000000':
                 self._sid = sid
+                self._sid_time = datetime.datetime.now()
                 return sid
 
     def _set(self, variable, value='', index=None):
